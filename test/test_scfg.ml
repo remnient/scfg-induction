@@ -465,6 +465,35 @@ let () =
      && approx (Parse.inside (Parse.prepare normalized) [ "b" ]) 1.0)
 
 let () =
+  let initial =
+    g "S" [ prod "S" [ nt "A"; nt "B" ]; prod "A" [ tm "a" ]; prod "B" [ tm "a" ] ]
+  in
+  let corpus = [ sample [ "a"; "a" ] 1.0 ] in
+  let config = Scoring.default_config in
+  let expected = Grammar.normalize (Transform.apply initial (Transform.Merge ("A", "B"))) in
+  List.iter
+    (fun frontier_cap ->
+      let result = Search.run_best_first ~config ~frontier_cap ~max_expansions:1
+          ~patience:1 initial corpus in
+      check "best-first retains an improvement found in the last expansion"
+        (result.Search.best_score > result.Search.initial_score
+         && Grammar.equal_structure result.Search.best expected);
+      check "best-first retains the history of the unexpanded winner"
+        (match result.Search.steps with
+         | [ step ] -> Grammar.equal_structure step.Search.result result.Search.best
+             && approx step.Search.score result.Search.best_score
+         | _ -> false);
+      check "best-first records the retained proposal as accepted"
+        (List.exists (fun p -> p.Search.accepted && approx p.Search.score result.Search.best_score)
+           result.Search.proposals))
+    [ 0; 1; 8 ];
+  let result = Search.run_best_first ~config ~frontier_cap:8 ~max_expansions:0
+      ~patience:1 initial corpus in
+  check "zero best-first expansions retain the initial grammar"
+    (result.Search.iterations = 0 && result.Search.steps = []
+     && result.Search.proposals = [] && Grammar.equal_structure result.Search.best initial)
+
+let () =
   if !failures = 0 then Printf.printf "\nAll tests passed.\n"
   else begin
     Printf.printf "\n%d test(s) failed.\n" !failures;

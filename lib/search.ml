@@ -192,9 +192,14 @@ let run_best_first ~config ~frontier_cap ~max_expansions ~patience g0 corpus =
               :: !proposals
         | [] -> ())
       cands;
-    if e.score > !best.score +. 1e-9 then begin
-      best := e;
-      (match e.hist with
+    let candidate =
+      List.fold_left
+        (fun best candidate -> if candidate.score > best.score then candidate else best)
+        e cands
+    in
+    if candidate.score > !best.score +. 1e-9 then begin
+      best := candidate;
+      (match candidate.hist with
       | step :: _ -> Hashtbl.replace accepted (transform_key step) ()
       | [] -> ());
       no_improve := 0
