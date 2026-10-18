@@ -175,13 +175,13 @@ let log_inside prep tokens =
 let inside prep tokens =
   match log_inside prep tokens with None -> 0.0 | Some probability -> exp probability
 
-let viterbi prep tokens =
+let log_viterbi prep tokens =
   let n = List.length tokens in
   let w = Array.of_list tokens in
   let vmemo = Hashtbl.create 1024 in
   let smemo = Hashtbl.create 1024 in
   let rec vnt nt i j =
-    if j <= i then (0.0, None)
+    if j <= i then (neg_infinity, None)
     else
       match Hashtbl.find_opt vmemo (nt, i, j) with
       | Some v -> v
@@ -189,13 +189,13 @@ let viterbi prep tokens =
           let idxs =
             Option.value ~default:[] (Hashtbl.find_opt prep.by_lhs nt)
           in
-          let bestp = ref 0.0 and bestt = ref None in
+          let bestp = ref neg_infinity and bestt = ref None in
           List.iter
             (fun pi ->
               let p = prep.prods.(pi) in
               let sp, sch = seq_vit p.rhs i j in
-              if sp > 0.0 then begin
-                let v = prep.probs.(pi) *. sp in
+              if prep.probs.(pi) > 0.0 && sp <> neg_infinity then begin
+                let v = log prep.probs.(pi) +. sp in
                 if v > !bestp then begin
                   bestp := v;
                   bestt :=
@@ -214,21 +214,21 @@ let viterbi prep tokens =
     | None ->
         let v =
           match rhs with
-          | [] -> if i = j then (1.0, Some []) else (0.0, None)
+          | [] -> if i = j then (0.0, Some []) else (neg_infinity, None)
           | Grammar.Term a :: rest ->
               if i < n && String.equal w.(i) a then (
                 match seq_vit rest (i + 1) j with
                 | p, Some ts -> (p, Some (Leaf a :: ts))
                 | z -> z)
-              else (0.0, None)
+              else (neg_infinity, None)
           | Grammar.Nonterm x :: rest ->
-              let bestp = ref 0.0 and bestch = ref None in
+              let bestp = ref neg_infinity and bestch = ref None in
               for k = i + 1 to j - List.length rest do
                 let px, tx = vnt x i k in
-                if px > 0.0 then begin
+                if px <> neg_infinity then begin
                   let pr, tr = seq_vit rest k j in
-                  if pr > 0.0 then begin
-                    let v = px *. pr in
+                  if pr <> neg_infinity then begin
+                    let v = px +. pr in
                     if v > !bestp then begin
                       bestp := v;
                       bestch :=
@@ -245,6 +245,10 @@ let viterbi prep tokens =
         v
   in
   vnt prep.start 0 n
+
+let viterbi prep tokens =
+  let log_probability, tree = log_viterbi prep tokens in
+  (exp log_probability, tree)
 
 let tree_to_string ?(indent = 0) tree =
   let rec go indent tree =

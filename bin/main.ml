@@ -199,10 +199,11 @@ let cmd_parse opts =
   in
   let prep = Parse.prepare g in
   let p = Parse.inside prep tokens in
-  let vp, tree = Parse.viterbi prep tokens in
+  let log_vp, tree = Parse.log_viterbi prep tokens in
   Printf.printf "tokens:      %s\n" (String.concat " " tokens);
   Printf.printf "P(string):   %.10g\n" p;
-  Printf.printf "best parse:  %.10g\n" vp;
+  Printf.printf "best parse:  %.10g\n" (exp log_vp);
+  Printf.printf "log best parse: %.10g\n" log_vp;
   (match tree with
   | Some t -> Printf.printf "%s\n" (Parse.tree_to_string t)
   | None -> print_endline "(no parse)");

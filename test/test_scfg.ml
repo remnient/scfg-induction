@@ -378,6 +378,33 @@ let () =
     (has_prod gn "S" [ nt "A"; nt "A"; nt "B" ])
 
 let () =
+  let recursive =
+    g "S"
+      [ prod "S" [ tm "a"; nt "S" ];
+        { Grammar.lhs = "S"; rhs = [ tm "a" ]; count = 999.0 } ]
+  in
+  let prep = Parse.prepare recursive in
+  let tokens = List.init 120 (fun _ -> "a") in
+  let log_probability, tree = Parse.log_viterbi prep tokens in
+  check "log Viterbi retains an underflowing parse score"
+    (approx log_probability ((119.0 *. log 0.001) +. log 0.999));
+  check "log Viterbi retains an underflowing parse tree"
+    (Option.map Parse.tree_yield tree = Some tokens);
+  let probability, tree = Parse.viterbi prep tokens in
+  check "probability Viterbi retains the tree when its score underflows"
+    (probability = 0.0 && Option.map Parse.tree_yield tree = Some tokens);
+  let log_probability, tree = Parse.log_viterbi prep [ "b" ] in
+  check "log Viterbi distinguishes an impossible parse"
+    (log_probability = neg_infinity && tree = None);
+  let amb = g "S" [ prod "S" [ nt "S"; nt "S" ]; prod "S" [ tm "a" ] ] in
+  let prep = Parse.prepare amb in
+  let tokens = [ "a"; "a"; "a" ] in
+  let log_probability, tree = Parse.log_viterbi prep tokens in
+  check "log Viterbi chooses one derivation of an ambiguous string"
+    (approx (exp log_probability) (1.0 /. 32.0)
+     && Option.map Parse.tree_yield tree = Some tokens)
+
+let () =
   if !failures = 0 then Printf.printf "\nAll tests passed.\n"
   else begin
     Printf.printf "\n%d test(s) failed.\n" !failures;
