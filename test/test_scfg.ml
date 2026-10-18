@@ -437,6 +437,34 @@ let () =
   check "EM likelihood includes unparseable corpus mass" (ll = neg_infinity)
 
 let () =
+  let grammars =
+    [ g "A" [ prod "A" [ nt "B" ]; prod "B" [ nt "A" ]; prod "B" [ tm "b" ] ];
+      g "A"
+        [ prod "A" [ nt "B" ]; prod "B" [ nt "C" ]; prod "C" [ nt "A" ];
+          prod "A" [ tm "a" ]; prod "B" [ nt "D" ]; prod "C" [ tm "c" ];
+          prod "D" [ tm "d" ] ];
+      g "A"
+        [ prod "A" [ nt "B" ]; prod "B" [ nt "A" ];
+          prod "A" [ tm "a"; nt "B" ]; prod "B" [ tm "b" ] ];
+      g "A" [ prod "A" [ nt "B" ]; prod "B" [ nt "A" ] ] ]
+  in
+  List.iteri
+    (fun i grammar ->
+      let normalized = Grammar.normalize grammar in
+      check (Printf.sprintf "unary cycle %d preserves terminal derivations" i)
+        (Grammar.language_up_to grammar 5 = Grammar.language_up_to normalized 5);
+      ignore (Parse.prepare normalized);
+      let reordered = { grammar with Grammar.productions = List.rev grammar.Grammar.productions } in
+      check (Printf.sprintf "unary cycle %d preserves exits after reordering" i)
+        (Grammar.language_up_to normalized 5
+         = Grammar.language_up_to (Grammar.normalize reordered) 5))
+    grammars;
+  let normalized = Grammar.normalize (List.hd grammars) in
+  check "a unary cycle retains an exit owned only by the other member"
+    (has_prod normalized "A" [ tm "b" ]
+     && approx (Parse.inside (Parse.prepare normalized) [ "b" ]) 1.0)
+
+let () =
   if !failures = 0 then Printf.printf "\nAll tests passed.\n"
   else begin
     Printf.printf "\n%d test(s) failed.\n" !failures;
