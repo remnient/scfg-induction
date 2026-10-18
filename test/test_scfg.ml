@@ -494,6 +494,39 @@ let () =
      && result.Search.proposals = [] && Grammar.equal_structure result.Search.best initial)
 
 let () =
+  let initial =
+    g "S"
+      [ prod "S" [ nt "A"; nt "B" ]; prod "S" [ nt "C"; nt "D" ];
+        prod "A" [ tm "a" ]; prod "B" [ tm "a" ];
+        prod "C" [ tm "b" ]; prod "D" [ tm "b" ] ]
+  in
+  let corpus = [ sample [ "a"; "a" ] 1.0; sample [ "b"; "b" ] 1.0 ] in
+  let config = { Scoring.default_config with em_iters = 2 } in
+  let merged a b = Grammar.normalize (Transform.apply initial (Transform.Merge (a, b))) in
+  let left = merged "A" "B" and right = merged "C" "D" in
+  check "symmetric search candidates have tied scores"
+    (approx (Scoring.posterior ~config left corpus) (Scoring.posterior ~config right corpus));
+  let expected_key = min (Search.key_of left) (Search.key_of right) in
+  Hashtbl.randomize ();
+  let runs =
+    List.init 4 (fun i ->
+      let initial = if i mod 2 = 0 then initial
+        else { initial with Grammar.productions = List.rev initial.Grammar.productions } in
+      let beam = Search.run ~config ~beam_width:1 ~max_steps:1 ~patience:1 initial corpus in
+      let first = Search.run_best_first ~config ~frontier_cap:1 ~max_expansions:1
+          ~patience:1 initial corpus in
+      List.iter
+        (fun result ->
+          check "search resolves tied improvements by canonical grammar key"
+            (Search.key_of result.Search.best = expected_key))
+        [ beam; first ];
+      (Search.proposals_to_tsv beam, Search.steps_to_tsv beam,
+       Search.proposals_to_tsv first, Search.steps_to_tsv first))
+  in
+  check "search histories and proposals ignore hash seeds and production order"
+    (List.length (List.sort_uniq compare runs) = 1)
+
+let () =
   if !failures = 0 then Printf.printf "\nAll tests passed.\n"
   else begin
     Printf.printf "\n%d test(s) failed.\n" !failures;

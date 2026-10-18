@@ -30,6 +30,17 @@ let key_of = Grammar.canonical_string
 let transform_key (s : step) =
   (key_of s.parent, Transform.describe s.transform)
 
+let compare_entries (a : entry) (b : entry) =
+  let score_order = compare b.score a.score in
+  if score_order <> 0 then score_order
+  else
+    let structure_order = String.compare (key_of a.g) (key_of b.g) in
+    if structure_order <> 0 then structure_order
+    else
+      compare
+        (List.sort compare a.g.Grammar.productions, List.rev_map transform_key a.hist)
+        (List.sort compare b.g.Grammar.productions, List.rev_map transform_key b.hist)
+
 let run ~config ~beam_width ~max_steps ~patience ?(on_step = fun _ _ -> ()) g0
     corpus =
   let score g = Scoring.posterior ~config g corpus in
@@ -70,10 +81,10 @@ let run ~config ~beam_width ~max_steps ~patience ?(on_step = fun _ _ -> ()) g0
       (fun e ->
         let k = key_of e.g in
         match Hashtbl.find_opt tbl k with
-        | Some e0 when e0.score >= e.score -> ()
+        | Some e0 when compare_entries e0 e <= 0 -> ()
         | _ -> Hashtbl.replace tbl k e)
       cands;
-    let cands = Hashtbl.fold (fun _ e acc -> e :: acc) tbl [] in
+    let cands = Hashtbl.fold (fun _ e acc -> e :: acc) tbl [] |> List.sort compare_entries in
     List.iter
       (fun e ->
         match e.hist with
@@ -89,8 +100,7 @@ let run ~config ~beam_width ~max_steps ~patience ?(on_step = fun _ _ -> ()) g0
               :: !proposals
         | [] -> ())
       cands;
-    let sorted = List.sort (fun a b -> compare b.score a.score) cands in
-    let newbeam = List.filteri (fun i _ -> i < beam_width) sorted in
+    let newbeam = List.filteri (fun i _ -> i < beam_width) cands in
     (match newbeam with
     | e :: _ when e.score > !best.score +. 1e-9 ->
         best := e;
@@ -141,7 +151,7 @@ let run_best_first ~config ~frontier_cap ~max_expansions ~patience g0 corpus =
       (fun e ->
         let k = key_of e.g in
         match Hashtbl.find_opt tbl k with
-        | Some e0 when e0.score >= e.score -> ()
+        | Some e0 when compare_entries e0 e <= 0 -> ()
         | _ -> Hashtbl.replace tbl k e)
       entries;
     Hashtbl.fold (fun _ e acc -> e :: acc) tbl []
@@ -150,7 +160,7 @@ let run_best_first ~config ~frontier_cap ~max_expansions ~patience g0 corpus =
     !frontier <> [] && !expansions < max_expansions && !no_improve < patience
   do
     incr iter;
-    let sorted = List.sort (fun a b -> compare b.score a.score) !frontier in
+    let sorted = List.sort compare_entries !frontier in
     let e = List.hd sorted in
     frontier := List.tl sorted;
     incr expansions;
@@ -176,6 +186,7 @@ let run_best_first ~config ~frontier_cap ~max_expansions ~patience g0 corpus =
                   :: e.hist;
               })
         (Transform.candidates e.g config)
+      |> List.sort compare_entries
     in
     List.iter
       (fun c ->
@@ -194,7 +205,7 @@ let run_best_first ~config ~frontier_cap ~max_expansions ~patience g0 corpus =
       cands;
     let candidate =
       List.fold_left
-        (fun best candidate -> if candidate.score > best.score then candidate else best)
+        (fun best candidate -> if compare_entries candidate best < 0 then candidate else best)
         e cands
     in
     if candidate.score > !best.score +. 1e-9 then begin
@@ -206,7 +217,7 @@ let run_best_first ~config ~frontier_cap ~max_expansions ~patience g0 corpus =
     end
     else incr no_improve;
     frontier := cands @ !frontier |> dedupe;
-    let sorted = List.sort (fun a b -> compare b.score a.score) !frontier in
+    let sorted = List.sort compare_entries !frontier in
     frontier := List.filteri (fun i _ -> i < frontier_cap) sorted
   done;
   let steps = List.rev !best.hist in
