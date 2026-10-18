@@ -405,6 +405,38 @@ let () =
      && Option.map Parse.tree_yield tree = Some tokens)
 
 let () =
+  let grammar =
+    g "S"
+      [ prod "S" [ nt "A"; nt "A" ]; prod "S" [ nt "A" ];
+        prod "A" [ tm "a" ]; prod "A" [ tm "a"; nt "A" ] ]
+  in
+  let corpus = [ sample [ "a"; "a" ] 2.0 ] in
+  let prep = Parse.prepare grammar in
+  let initial_probs = Array.copy prep.Parse.probs in
+  let counts, ll = Parse.fit_em prep corpus ~iters:0 ~tol:1e-9 in
+  check "zero EM updates retain the initial parameters"
+    (prep.Parse.probs = initial_probs);
+  check "zero EM updates report the initial likelihood and counts"
+    (approx ll (2.0 *. log 0.25)
+     && Array.for_all2 approx counts [| 1.0; 1.0; 3.0; 1.0 |]);
+  let counts, ll = Parse.fit_em prep corpus ~iters:1 ~tol:1e-9 in
+  check "one EM update reports the updated likelihood"
+    (approx ll (2.0 *. log 0.375));
+  let expected = [| 1.5; 0.5; 3.5; 0.5 |] in
+  check "one EM update reports counts under the updated parameters"
+    (Array.for_all2 approx counts expected);
+  let prep = Parse.prepare grammar in
+  let counts, ll = Parse.fit_em prep corpus ~iters:10 ~tol:1e6 in
+  let fresh_counts, fresh_ll = Parse.expected_counts_log prep [ "a"; "a" ] in
+  check "EM convergence returns statistics for the retained parameters"
+    (approx ll (2.0 *. fresh_ll)
+     && Array.for_all2 (fun count fresh -> approx count (2.0 *. fresh)) counts fresh_counts);
+  let prep = Parse.prepare (g "S" [ prod "S" [ tm "a" ] ]) in
+  let _, ll = Parse.fit_em prep [ sample [ "a" ] 1.0; sample [ "b" ] 1.0 ]
+      ~iters:1 ~tol:1e-9 in
+  check "EM likelihood includes unparseable corpus mass" (ll = neg_infinity)
+
+let () =
   if !failures = 0 then Printf.printf "\nAll tests passed.\n"
   else begin
     Printf.printf "\n%d test(s) failed.\n" !failures;

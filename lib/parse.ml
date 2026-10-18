@@ -345,37 +345,39 @@ let expected_counts prep tokens =
 
 let fit_em prep (corpus : Corpus.t) ~iters ~tol =
   let np = Array.length prep.prods in
-  let last_ll = ref neg_infinity in
-  let ll = ref 0.0 in
-  let counts = ref (Array.make np 0.0) in
+  let expectation () =
+    let acc = Array.make np 0.0 in
+    let ll = ref 0.0 in
+    List.iter
+      (fun s ->
+        if s.Corpus.count <> 0.0 then begin
+          let cnt, log_probability = expected_counts_log prep s.Corpus.tokens in
+          if log_probability = neg_infinity then ll := neg_infinity
+          else begin
+            Array.iteri
+              (fun i x -> acc.(i) <- acc.(i) +. (s.Corpus.count *. x))
+              cnt;
+            ll := !ll +. (s.Corpus.count *. log_probability)
+          end
+        end)
+      corpus;
+    (acc, !ll)
+  in
+  let initial_counts, initial_ll = expectation () in
+  let counts = ref initial_counts and ll = ref initial_ll in
   (try
      for _ = 1 to iters do
-       let acc = Array.make np 0.0 in
-       ll := 0.0;
-       List.iter
-         (fun s ->
-           let cnt, log_probability =
-             expected_counts_log prep s.Corpus.tokens
-           in
-           if log_probability <> neg_infinity then begin
-             Array.iteri
-               (fun i x -> acc.(i) <- acc.(i) +. (s.Corpus.count *. x))
-               cnt;
-             ll := !ll +. (s.Corpus.count *. log_probability)
-           end)
-         corpus;
        Hashtbl.iter
          (fun _ idxs ->
-           let tot = List.fold_left (fun s i -> s +. acc.(i)) 0.0 idxs in
+           let tot = List.fold_left (fun s i -> s +. (!counts).(i)) 0.0 idxs in
            if tot > 0.0 then
-             List.iter (fun i -> prep.probs.(i) <- acc.(i) /. tot) idxs)
+             List.iter (fun i -> prep.probs.(i) <- (!counts).(i) /. tot) idxs)
          prep.by_lhs;
-       counts := acc;
-       if
-         !last_ll <> neg_infinity
-         && abs_float (!ll -. !last_ll) < tol
-       then raise Exit;
-       last_ll := !ll
+       let next_counts, next_ll = expectation () in
+       let converged = Float.is_finite !ll && abs_float (next_ll -. !ll) < tol in
+       counts := next_counts;
+       ll := next_ll;
+       if converged then raise Exit
      done
    with Exit -> ());
   (!counts, !ll)
