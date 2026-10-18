@@ -527,6 +527,39 @@ let () =
     (List.length (List.sort_uniq compare runs) = 1)
 
 let () =
+  let grammar =
+    g "Root"
+      [ prod "Root" [ nt "S" ]; prod "S" [ nt "A"; tm "x"; nt "B"; nt "A" ];
+        prod "S" [ nt "B"; tm "x"; nt "A"; nt "B" ];
+        { Grammar.lhs = "A"; rhs = [ tm "a" ]; count = 7.0 };
+        { Grammar.lhs = "A"; rhs = [ tm "b" ]; count = 3.0 };
+        { Grammar.lhs = "B"; rhs = [ tm "a" ]; count = 2.0 };
+        { Grammar.lhs = "B"; rhs = [ tm "b" ]; count = 8.0 } ]
+  in
+  let prep = Parse.prepare grammar in
+  let tokens = [ "a"; "x"; "b"; "a" ] in
+  let counts, ll = Parse.expected_counts_log prep tokens in
+  check "outside contexts preserve mixed RHS likelihoods"
+    (approx ll (log 0.202));
+  check "outside contexts distinguish repeated nonterminal positions"
+    (Array.for_all2 approx counts
+       [| 1.0; 98.0 /. 101.0; 3.0 /. 101.0; 196.0 /. 101.0;
+          3.0 /. 101.0; 6.0 /. 101.0; 98.0 /. 101.0 |]);
+  prep.Parse.probs.(3) <- 0.4;
+  prep.Parse.probs.(4) <- 0.6;
+  prep.Parse.probs.(5) <- 0.9;
+  prep.Parse.probs.(6) <- 0.1;
+  let counts, ll = Parse.expected_counts_log prep tokens in
+  check "prepared outside contexts use updated probabilities"
+    (approx ll (log 0.251)
+     && Array.for_all2 approx counts
+       [| 1.0; 8.0 /. 251.0; 243.0 /. 251.0; 16.0 /. 251.0;
+          243.0 /. 251.0; 486.0 /. 251.0; 8.0 /. 251.0 |]);
+  let counts, ll = Parse.expected_counts_log prep [ "a"; "b"; "a" ] in
+  check "outside contexts retain impossible-string results"
+    (ll = neg_infinity && Array.for_all (( = ) 0.0) counts)
+
+let () =
   if !failures = 0 then Printf.printf "\nAll tests passed.\n"
   else begin
     Printf.printf "\n%d test(s) failed.\n" !failures;

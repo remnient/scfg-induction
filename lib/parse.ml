@@ -6,6 +6,7 @@ let rec tree_yield = function
 
 type prep = {
   prods : Grammar.production array;
+  contexts : (string * Grammar.symbol list * Grammar.symbol list) list array;
   mutable probs : float array;
   by_lhs : (string, int list) Hashtbl.t;
   lhs_list : string list;
@@ -56,6 +57,18 @@ let unary_order prods by_lhs =
 
 let prepare (g : Grammar.t) =
   let prods : Grammar.production array = Array.of_list g.productions in
+  let contexts =
+    Array.map
+      (fun (p : Grammar.production) ->
+        let rec collect prefix acc = function
+          | [] -> List.rev acc
+          | (Grammar.Nonterm child as symbol) :: suffix ->
+              collect (symbol :: prefix) ((child, List.rev prefix, suffix) :: acc) suffix
+          | symbol :: suffix -> collect (symbol :: prefix) acc suffix
+        in
+        collect [] [] p.rhs)
+      prods
+  in
   let n = Array.length prods in
   let probs = Array.make n 0.0 in
   let by_lhs = Hashtbl.create 64 in
@@ -81,6 +94,7 @@ let prepare (g : Grammar.t) =
     by_lhs;
   {
     prods;
+    contexts;
     probs;
     by_lhs;
     lhs_list = unary_order prods by_lhs;
@@ -288,31 +302,18 @@ let expected_counts_log prep tokens =
                   if String.equal prod.lhs b then begin
                     let prob = prep.probs.(pi) in
                     if prob > 0.0 then begin
-                      let arr = Array.of_list prod.rhs in
-                      let m = Array.length arr in
-                      Array.iteri
-                        (fun k s ->
-                          match s with
-                          | Grammar.Nonterm x ->
-                              let left =
-                                Array.to_list (Array.sub arr 0 k)
-                              in
-                              let right =
-                                Array.to_list
-                                  (Array.sub arr (k + 1) (m - k - 1))
-                              in
-                              for i = p to q do
-                                let lw = seq_inside left p i in
-                                if lw <> neg_infinity then
-                                  for j = i to q do
-                                    let rw = seq_inside right j q in
-                                    if rw <> neg_infinity then
-                                      add_o x i j
-                                        (ob +. log prob +. lw +. rw)
-                                  done
+                      List.iter
+                        (fun (x, left, right) ->
+                          for i = p to q do
+                            let lw = seq_inside left p i in
+                            if lw <> neg_infinity then
+                              for j = i to q do
+                                let rw = seq_inside right j q in
+                                if rw <> neg_infinity then
+                                  add_o x i j (ob +. log prob +. lw +. rw)
                               done
-                          | Grammar.Term _ -> ())
-                        arr
+                          done)
+                        prep.contexts.(pi)
                     end
                   end)
                 (Option.value ~default:[]
