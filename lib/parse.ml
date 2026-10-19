@@ -6,6 +6,7 @@ let rec tree_yield = function
 
 type prep = {
   prods : Grammar.production array;
+  contexts : (string * Grammar.symbol list * Grammar.symbol list) list array;
   mutable probs : float array;
   by_lhs : (string, int list) Hashtbl.t;
   lhs_list : string list;
@@ -56,6 +57,18 @@ let unary_order prods by_lhs =
 
 let prepare (g : Grammar.t) =
   let prods : Grammar.production array = Array.of_list g.productions in
+  let contexts =
+    Array.map
+      (fun (p : Grammar.production) ->
+        let rec collect prefix acc = function
+          | [] -> List.rev acc
+          | (Grammar.Nonterm child as symbol) :: suffix ->
+              collect (symbol :: prefix) ((child, List.rev prefix, suffix) :: acc) suffix
+          | symbol :: suffix -> collect (symbol :: prefix) acc suffix
+        in
+        collect [] [] p.rhs)
+      prods
+  in
   let n = Array.length prods in
   let probs = Array.make n 0.0 in
   let by_lhs = Hashtbl.create 64 in
@@ -81,6 +94,7 @@ let prepare (g : Grammar.t) =
     by_lhs;
   {
     prods;
+    contexts;
     probs;
     by_lhs;
     lhs_list = unary_order prods by_lhs;
@@ -175,13 +189,13 @@ let log_inside prep tokens =
 let inside prep tokens =
   match log_inside prep tokens with None -> 0.0 | Some probability -> exp probability
 
-let viterbi prep tokens =
+let log_viterbi prep tokens =
   let n = List.length tokens in
   let w = Array.of_list tokens in
   let vmemo = Hashtbl.create 1024 in
   let smemo = Hashtbl.create 1024 in
   let rec vnt nt i j =
-    if j <= i then (0.0, None)
+    if j <= i then (neg_infinity, None)
     else
       match Hashtbl.find_opt vmemo (nt, i, j) with
       | Some v -> v
@@ -189,13 +203,13 @@ let viterbi prep tokens =
           let idxs =
             Option.value ~default:[] (Hashtbl.find_opt prep.by_lhs nt)
           in
-          let bestp = ref 0.0 and bestt = ref None in
+          let bestp = ref neg_infinity and bestt = ref None in
           List.iter
             (fun pi ->
               let p = prep.prods.(pi) in
               let sp, sch = seq_vit p.rhs i j in
-              if sp > 0.0 then begin
-                let v = prep.probs.(pi) *. sp in
+              if prep.probs.(pi) > 0.0 && sp <> neg_infinity then begin
+                let v = log prep.probs.(pi) +. sp in
                 if v > !bestp then begin
                   bestp := v;
                   bestt :=
@@ -214,21 +228,21 @@ let viterbi prep tokens =
     | None ->
         let v =
           match rhs with
-          | [] -> if i = j then (1.0, Some []) else (0.0, None)
+          | [] -> if i = j then (0.0, Some []) else (neg_infinity, None)
           | Grammar.Term a :: rest ->
               if i < n && String.equal w.(i) a then (
                 match seq_vit rest (i + 1) j with
                 | p, Some ts -> (p, Some (Leaf a :: ts))
                 | z -> z)
-              else (0.0, None)
+              else (neg_infinity, None)
           | Grammar.Nonterm x :: rest ->
-              let bestp = ref 0.0 and bestch = ref None in
+              let bestp = ref neg_infinity and bestch = ref None in
               for k = i + 1 to j - List.length rest do
                 let px, tx = vnt x i k in
-                if px > 0.0 then begin
+                if px <> neg_infinity then begin
                   let pr, tr = seq_vit rest k j in
-                  if pr > 0.0 then begin
-                    let v = px *. pr in
+                  if pr <> neg_infinity then begin
+                    let v = px +. pr in
                     if v > !bestp then begin
                       bestp := v;
                       bestch :=
@@ -245,6 +259,10 @@ let viterbi prep tokens =
         v
   in
   vnt prep.start 0 n
+
+let viterbi prep tokens =
+  let log_probability, tree = log_viterbi prep tokens in
+  (exp log_probability, tree)
 
 let tree_to_string ?(indent = 0) tree =
   let rec go indent tree =
@@ -284,31 +302,18 @@ let expected_counts_log prep tokens =
                   if String.equal prod.lhs b then begin
                     let prob = prep.probs.(pi) in
                     if prob > 0.0 then begin
-                      let arr = Array.of_list prod.rhs in
-                      let m = Array.length arr in
-                      Array.iteri
-                        (fun k s ->
-                          match s with
-                          | Grammar.Nonterm x ->
-                              let left =
-                                Array.to_list (Array.sub arr 0 k)
-                              in
-                              let right =
-                                Array.to_list
-                                  (Array.sub arr (k + 1) (m - k - 1))
-                              in
-                              for i = p to q do
-                                let lw = seq_inside left p i in
-                                if lw <> neg_infinity then
-                                  for j = i to q do
-                                    let rw = seq_inside right j q in
-                                    if rw <> neg_infinity then
-                                      add_o x i j
-                                        (ob +. log prob +. lw +. rw)
-                                  done
+                      List.iter
+                        (fun (x, left, right) ->
+                          for i = p to q do
+                            let lw = seq_inside left p i in
+                            if lw <> neg_infinity then
+                              for j = i to q do
+                                let rw = seq_inside right j q in
+                                if rw <> neg_infinity then
+                                  add_o x i j (ob +. log prob +. lw +. rw)
                               done
-                          | Grammar.Term _ -> ())
-                        arr
+                          done)
+                        prep.contexts.(pi)
                     end
                   end)
                 (Option.value ~default:[]
@@ -341,37 +346,39 @@ let expected_counts prep tokens =
 
 let fit_em prep (corpus : Corpus.t) ~iters ~tol =
   let np = Array.length prep.prods in
-  let last_ll = ref neg_infinity in
-  let ll = ref 0.0 in
-  let counts = ref (Array.make np 0.0) in
+  let expectation () =
+    let acc = Array.make np 0.0 in
+    let ll = ref 0.0 in
+    List.iter
+      (fun s ->
+        if s.Corpus.count <> 0.0 then begin
+          let cnt, log_probability = expected_counts_log prep s.Corpus.tokens in
+          if log_probability = neg_infinity then ll := neg_infinity
+          else begin
+            Array.iteri
+              (fun i x -> acc.(i) <- acc.(i) +. (s.Corpus.count *. x))
+              cnt;
+            ll := !ll +. (s.Corpus.count *. log_probability)
+          end
+        end)
+      corpus;
+    (acc, !ll)
+  in
+  let initial_counts, initial_ll = expectation () in
+  let counts = ref initial_counts and ll = ref initial_ll in
   (try
      for _ = 1 to iters do
-       let acc = Array.make np 0.0 in
-       ll := 0.0;
-       List.iter
-         (fun s ->
-           let cnt, log_probability =
-             expected_counts_log prep s.Corpus.tokens
-           in
-           if log_probability <> neg_infinity then begin
-             Array.iteri
-               (fun i x -> acc.(i) <- acc.(i) +. (s.Corpus.count *. x))
-               cnt;
-             ll := !ll +. (s.Corpus.count *. log_probability)
-           end)
-         corpus;
        Hashtbl.iter
          (fun _ idxs ->
-           let tot = List.fold_left (fun s i -> s +. acc.(i)) 0.0 idxs in
+           let tot = List.fold_left (fun s i -> s +. (!counts).(i)) 0.0 idxs in
            if tot > 0.0 then
-             List.iter (fun i -> prep.probs.(i) <- acc.(i) /. tot) idxs)
+             List.iter (fun i -> prep.probs.(i) <- (!counts).(i) /. tot) idxs)
          prep.by_lhs;
-       counts := acc;
-       if
-         !last_ll <> neg_infinity
-         && abs_float (!ll -. !last_ll) < tol
-       then raise Exit;
-       last_ll := !ll
+       let next_counts, next_ll = expectation () in
+       let converged = Float.is_finite !ll && abs_float (next_ll -. !ll) < tol in
+       counts := next_counts;
+       ll := next_ll;
+       if converged then raise Exit
      done
    with Exit -> ());
   (!counts, !ll)

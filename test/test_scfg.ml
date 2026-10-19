@@ -378,6 +378,188 @@ let () =
     (has_prod gn "S" [ nt "A"; nt "A"; nt "B" ])
 
 let () =
+  let recursive =
+    g "S"
+      [ prod "S" [ tm "a"; nt "S" ];
+        { Grammar.lhs = "S"; rhs = [ tm "a" ]; count = 999.0 } ]
+  in
+  let prep = Parse.prepare recursive in
+  let tokens = List.init 120 (fun _ -> "a") in
+  let log_probability, tree = Parse.log_viterbi prep tokens in
+  check "log Viterbi retains an underflowing parse score"
+    (approx log_probability ((119.0 *. log 0.001) +. log 0.999));
+  check "log Viterbi retains an underflowing parse tree"
+    (Option.map Parse.tree_yield tree = Some tokens);
+  let probability, tree = Parse.viterbi prep tokens in
+  check "probability Viterbi retains the tree when its score underflows"
+    (probability = 0.0 && Option.map Parse.tree_yield tree = Some tokens);
+  let log_probability, tree = Parse.log_viterbi prep [ "b" ] in
+  check "log Viterbi distinguishes an impossible parse"
+    (log_probability = neg_infinity && tree = None);
+  let amb = g "S" [ prod "S" [ nt "S"; nt "S" ]; prod "S" [ tm "a" ] ] in
+  let prep = Parse.prepare amb in
+  let tokens = [ "a"; "a"; "a" ] in
+  let log_probability, tree = Parse.log_viterbi prep tokens in
+  check "log Viterbi chooses one derivation of an ambiguous string"
+    (approx (exp log_probability) (1.0 /. 32.0)
+     && Option.map Parse.tree_yield tree = Some tokens)
+
+let () =
+  let grammar =
+    g "S"
+      [ prod "S" [ nt "A"; nt "A" ]; prod "S" [ nt "A" ];
+        prod "A" [ tm "a" ]; prod "A" [ tm "a"; nt "A" ] ]
+  in
+  let corpus = [ sample [ "a"; "a" ] 2.0 ] in
+  let prep = Parse.prepare grammar in
+  let initial_probs = Array.copy prep.Parse.probs in
+  let counts, ll = Parse.fit_em prep corpus ~iters:0 ~tol:1e-9 in
+  check "zero EM updates retain the initial parameters"
+    (prep.Parse.probs = initial_probs);
+  check "zero EM updates report the initial likelihood and counts"
+    (approx ll (2.0 *. log 0.25)
+     && Array.for_all2 approx counts [| 1.0; 1.0; 3.0; 1.0 |]);
+  let counts, ll = Parse.fit_em prep corpus ~iters:1 ~tol:1e-9 in
+  check "one EM update reports the updated likelihood"
+    (approx ll (2.0 *. log 0.375));
+  let expected = [| 1.5; 0.5; 3.5; 0.5 |] in
+  check "one EM update reports counts under the updated parameters"
+    (Array.for_all2 approx counts expected);
+  let prep = Parse.prepare grammar in
+  let counts, ll = Parse.fit_em prep corpus ~iters:10 ~tol:1e6 in
+  let fresh_counts, fresh_ll = Parse.expected_counts_log prep [ "a"; "a" ] in
+  check "EM convergence returns statistics for the retained parameters"
+    (approx ll (2.0 *. fresh_ll)
+     && Array.for_all2 (fun count fresh -> approx count (2.0 *. fresh)) counts fresh_counts);
+  let prep = Parse.prepare (g "S" [ prod "S" [ tm "a" ] ]) in
+  let _, ll = Parse.fit_em prep [ sample [ "a" ] 1.0; sample [ "b" ] 1.0 ]
+      ~iters:1 ~tol:1e-9 in
+  check "EM likelihood includes unparseable corpus mass" (ll = neg_infinity)
+
+let () =
+  let grammars =
+    [ g "A" [ prod "A" [ nt "B" ]; prod "B" [ nt "A" ]; prod "B" [ tm "b" ] ];
+      g "A"
+        [ prod "A" [ nt "B" ]; prod "B" [ nt "C" ]; prod "C" [ nt "A" ];
+          prod "A" [ tm "a" ]; prod "B" [ nt "D" ]; prod "C" [ tm "c" ];
+          prod "D" [ tm "d" ] ];
+      g "A"
+        [ prod "A" [ nt "B" ]; prod "B" [ nt "A" ];
+          prod "A" [ tm "a"; nt "B" ]; prod "B" [ tm "b" ] ];
+      g "A" [ prod "A" [ nt "B" ]; prod "B" [ nt "A" ] ] ]
+  in
+  List.iteri
+    (fun i grammar ->
+      let normalized = Grammar.normalize grammar in
+      check (Printf.sprintf "unary cycle %d preserves terminal derivations" i)
+        (Grammar.language_up_to grammar 5 = Grammar.language_up_to normalized 5);
+      ignore (Parse.prepare normalized);
+      let reordered = { grammar with Grammar.productions = List.rev grammar.Grammar.productions } in
+      check (Printf.sprintf "unary cycle %d preserves exits after reordering" i)
+        (Grammar.language_up_to normalized 5
+         = Grammar.language_up_to (Grammar.normalize reordered) 5))
+    grammars;
+  let normalized = Grammar.normalize (List.hd grammars) in
+  check "a unary cycle retains an exit owned only by the other member"
+    (has_prod normalized "A" [ tm "b" ]
+     && approx (Parse.inside (Parse.prepare normalized) [ "b" ]) 1.0)
+
+let () =
+  let initial =
+    g "S" [ prod "S" [ nt "A"; nt "B" ]; prod "A" [ tm "a" ]; prod "B" [ tm "a" ] ]
+  in
+  let corpus = [ sample [ "a"; "a" ] 1.0 ] in
+  let config = Scoring.default_config in
+  let expected = Grammar.normalize (Transform.apply initial (Transform.Merge ("A", "B"))) in
+  List.iter
+    (fun frontier_cap ->
+      let result = Search.run_best_first ~config ~frontier_cap ~max_expansions:1
+          ~patience:1 initial corpus in
+      check "best-first retains an improvement found in the last expansion"
+        (result.Search.best_score > result.Search.initial_score
+         && Grammar.equal_structure result.Search.best expected);
+      check "best-first retains the history of the unexpanded winner"
+        (match result.Search.steps with
+         | [ step ] -> Grammar.equal_structure step.Search.result result.Search.best
+             && approx step.Search.score result.Search.best_score
+         | _ -> false);
+      check "best-first records the retained proposal as accepted"
+        (List.exists (fun p -> p.Search.accepted && approx p.Search.score result.Search.best_score)
+           result.Search.proposals))
+    [ 0; 1; 8 ];
+  let result = Search.run_best_first ~config ~frontier_cap:8 ~max_expansions:0
+      ~patience:1 initial corpus in
+  check "zero best-first expansions retain the initial grammar"
+    (result.Search.iterations = 0 && result.Search.steps = []
+     && result.Search.proposals = [] && Grammar.equal_structure result.Search.best initial)
+
+let () =
+  let initial =
+    g "S"
+      [ prod "S" [ nt "A"; nt "B" ]; prod "S" [ nt "C"; nt "D" ];
+        prod "A" [ tm "a" ]; prod "B" [ tm "a" ];
+        prod "C" [ tm "b" ]; prod "D" [ tm "b" ] ]
+  in
+  let corpus = [ sample [ "a"; "a" ] 1.0; sample [ "b"; "b" ] 1.0 ] in
+  let config = { Scoring.default_config with em_iters = 2 } in
+  let merged a b = Grammar.normalize (Transform.apply initial (Transform.Merge (a, b))) in
+  let left = merged "A" "B" and right = merged "C" "D" in
+  check "symmetric search candidates have tied scores"
+    (approx (Scoring.posterior ~config left corpus) (Scoring.posterior ~config right corpus));
+  let expected_key = min (Search.key_of left) (Search.key_of right) in
+  Hashtbl.randomize ();
+  let runs =
+    List.init 4 (fun i ->
+      let initial = if i mod 2 = 0 then initial
+        else { initial with Grammar.productions = List.rev initial.Grammar.productions } in
+      let beam = Search.run ~config ~beam_width:1 ~max_steps:1 ~patience:1 initial corpus in
+      let first = Search.run_best_first ~config ~frontier_cap:1 ~max_expansions:1
+          ~patience:1 initial corpus in
+      List.iter
+        (fun result ->
+          check "search resolves tied improvements by canonical grammar key"
+            (Search.key_of result.Search.best = expected_key))
+        [ beam; first ];
+      (Search.proposals_to_tsv beam, Search.steps_to_tsv beam,
+       Search.proposals_to_tsv first, Search.steps_to_tsv first))
+  in
+  check "search histories and proposals ignore hash seeds and production order"
+    (List.length (List.sort_uniq compare runs) = 1)
+
+let () =
+  let grammar =
+    g "Root"
+      [ prod "Root" [ nt "S" ]; prod "S" [ nt "A"; tm "x"; nt "B"; nt "A" ];
+        prod "S" [ nt "B"; tm "x"; nt "A"; nt "B" ];
+        { Grammar.lhs = "A"; rhs = [ tm "a" ]; count = 7.0 };
+        { Grammar.lhs = "A"; rhs = [ tm "b" ]; count = 3.0 };
+        { Grammar.lhs = "B"; rhs = [ tm "a" ]; count = 2.0 };
+        { Grammar.lhs = "B"; rhs = [ tm "b" ]; count = 8.0 } ]
+  in
+  let prep = Parse.prepare grammar in
+  let tokens = [ "a"; "x"; "b"; "a" ] in
+  let counts, ll = Parse.expected_counts_log prep tokens in
+  check "outside contexts preserve mixed RHS likelihoods"
+    (approx ll (log 0.202));
+  check "outside contexts distinguish repeated nonterminal positions"
+    (Array.for_all2 approx counts
+       [| 1.0; 98.0 /. 101.0; 3.0 /. 101.0; 196.0 /. 101.0;
+          3.0 /. 101.0; 6.0 /. 101.0; 98.0 /. 101.0 |]);
+  prep.Parse.probs.(3) <- 0.4;
+  prep.Parse.probs.(4) <- 0.6;
+  prep.Parse.probs.(5) <- 0.9;
+  prep.Parse.probs.(6) <- 0.1;
+  let counts, ll = Parse.expected_counts_log prep tokens in
+  check "prepared outside contexts use updated probabilities"
+    (approx ll (log 0.251)
+     && Array.for_all2 approx counts
+       [| 1.0; 8.0 /. 251.0; 243.0 /. 251.0; 16.0 /. 251.0;
+          243.0 /. 251.0; 486.0 /. 251.0; 8.0 /. 251.0 |]);
+  let counts, ll = Parse.expected_counts_log prep [ "a"; "b"; "a" ] in
+  check "outside contexts retain impossible-string results"
+    (ll = neg_infinity && Array.for_all (( = ) 0.0) counts)
+
+let () =
   if !failures = 0 then Printf.printf "\nAll tests passed.\n"
   else begin
     Printf.printf "\n%d test(s) failed.\n" !failures;

@@ -226,13 +226,22 @@ let remove_unit_cycles prods =
     in
     go a
   in
-  List.filter
-    (fun (p : production) ->
-      match p.rhs with
-      | [ Nonterm b ] ->
-          not (String.equal p.lhs b) && not (reaches b p.lhs)
-      | _ -> true)
-    prods
+  let nts = List.map (fun p -> p.lhs) prods |> List.sort_uniq String.compare in
+  List.concat_map
+    (fun lhs ->
+      let members =
+        List.filter (fun nt -> reaches lhs nt && reaches nt lhs) nts
+      in
+      List.filter_map
+        (fun p ->
+          if not (List.mem p.lhs members) then None
+          else
+            match p.rhs with
+            | [ Nonterm child ] when List.mem child members -> None
+            | _ -> Some { p with lhs })
+        prods)
+    nts
+  |> dedupe
 
 let productive_set prods =
   let tbl = Hashtbl.create 64 in
